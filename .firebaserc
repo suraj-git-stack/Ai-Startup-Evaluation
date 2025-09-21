@@ -1,0 +1,11 @@
+{
+  "projects": {
+    "default": "startup-evaluation-472010"
+  },
+  "targets": {},
+  "etags": {
+    "startup-evaluation-472010": {
+      "extensionInstances": {}
+    }
+  }
+}

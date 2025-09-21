@@ -1,0 +1,15 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Allow Cloud Functions to read all files
+    match /{allPaths=**} {
+      allow read: if true;  // ← Allow all reads for functions
+      allow write: if request.auth != null;  // Authenticated writes only
+    }
+    
+    // Specific user upload rules
+    match /uploads/{userId}/{allPaths=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}

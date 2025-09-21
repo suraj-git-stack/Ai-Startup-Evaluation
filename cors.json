@@ -1,0 +1,21 @@
+[
+  {
+    "origin": [
+      "https://startup-evaluation-472010.web.app",
+      "http://localhost:5000",
+      "https://localhost:5000",
+      "http://127.0.0.1:5000"
+    ],
+    "method": ["GET", "POST", "PUT", "DELETE", "HEAD"],
+    "responseHeader": [
+      "Content-Type",
+      "Access-Control-Allow-Origin",
+      "Access-Control-Allow-Methods",
+      "Access-Control-Allow-Headers",
+      "Authorization",
+      "X-Requested-With",
+      "Content-Length"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]
