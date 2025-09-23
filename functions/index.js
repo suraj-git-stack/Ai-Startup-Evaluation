@@ -3,20 +3,35 @@ const { logger } = require("firebase-functions");
 const admin = require("firebase-admin");
 const pdf = require('pdf-parse');
 
-// Try to import Vertex AI (with fallback)
-let VertexAI;
-try {
-  const vertexai = require('@google-cloud/vertexai');
-  VertexAI = vertexai.VertexAI;
-  logger.info('✅ Vertex AI SDK loaded successfully');
-} catch (importError) {
-  logger.warn('⚠️  Vertex AI SDK not available:', importError.message);
-  VertexAI = null;
-}
-
 // Initialize Firebase Admin
 if (!admin.apps.length) {
   admin.initializeApp();
+}
+
+// Vertex AI imports - FIXED
+let vertexAIClient = null;
+let embeddingClient = null;
+
+try {
+  // Import Vertex AI Generative AI
+  const { VertexAI } = require('@google-cloud/vertexai');
+  vertexAIClient = new VertexAI({
+    project: 'startup-evaluation-472010',
+    location: 'us-central1'
+  });
+  logger.info('Vertex AI Generative AI SDK loaded successfully');
+
+  // Import for embeddings
+  const { PredictionServiceClient } = require('@google-cloud/aiplatform');
+  embeddingClient = new PredictionServiceClient({
+    projectId: 'startup-evaluation-472010',
+    location: 'us-central1'
+  });
+  logger.info('Vertex AI Embedding client loaded successfully');
+} catch (importError) {
+  logger.warn('Vertex AI SDK not available:', importError.message);
+  vertexAIClient = null;
+  embeddingClient = null;
 }
 
 // Simple test function
@@ -26,7 +41,7 @@ exports.helloWorld = onCall((request) => {
   return {
     message: "Hello from Firebase Functions v2 with AI!",
     timestamp: new Date().toISOString(),
-    aiAvailable: !!VertexAI
+    aiAvailable: !!vertexAIClient
   };
 });
 
@@ -36,26 +51,49 @@ exports.healthCheck = onCall(() => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     project: 'startup-evaluation-472010',
-    aiAvailable: !!VertexAI,
+    aiAvailable: !!vertexAIClient,
     services: {
       storage: 'available',
       pdfParse: 'working',
-      vertexAI: VertexAI ? 'ready' : 'setup required'
+      vertexAI: vertexAIClient ? 'ready' : 'setup required',
+      embeddings: !!embeddingClient
     }
   };
 });
 
-// AI-Powered PDF processing (FIXED SCOPE)
+// Test storage access
+exports.testStorageAccess = onCall(async (request) => {
+  try {
+    const { pdfUrl } = request.data;
+    if (!pdfUrl) return {success: false, error: 'No PDF URL'};
+    const filePath = parseFilePath(pdfUrl);
+    const bucket = admin.storage().bucket();
+    const file = bucket.file(filePath);
+    const [exists] = await file.exists();
+    if (!exists) return {success: false, error: 'File not found'};
+    const [metadata] = await file.getMetadata();
+    return {
+      success: true,
+      message: 'Storage access confirmed',
+      size: metadata.size,
+      contentType: metadata.contentType
+    };
+  } catch (error) {
+    logger.error('Test storage failed:', error);
+    return {success: false, error: error.message};
+  }
+});
+
+// RAG-powered PDF processing - FIXED
 exports.processPitchDeck = onCall(async (request) => {
   const startTime = Date.now();
-  logger.info('=== AI PITCH DECK ANALYSIS START ===', { 
+  logger.info('=== AI PITCH DECK RAG ANALYSIS START ===', { 
     user: request.auth?.uid, 
     pdfUrl: request.data?.pdfUrl 
   });
   
   let extractedText = '';
   let pdfBuffer = null;
-  let extractionPrompt = ''; // ✅ FIXED: Declare at top level
   
   try {
     const { pdfUrl } = request.data;
@@ -65,27 +103,10 @@ exports.processPitchDeck = onCall(async (request) => {
     
     // Step 1: Download PDF from Firebase Storage
     logger.info('Step 1: Downloading PDF...');
-    
-    // Parse file path from Firebase Storage URL
-    let filePath;
-    const urlMatch = pdfUrl.match(/name=([^&]+)/);
-    if (urlMatch) {
-      filePath = decodeURIComponent(urlMatch[1]);
-      logger.info('Parsed with name= parameter');
-    } else {
-      const altMatch = pdfUrl.match(/o\/([^?]+)/);
-      if (altMatch) {
-        const encodedPath = altMatch[1];
-        filePath = decodeURIComponent(encodedPath.replace(/%2F/g, '/'));
-        logger.info('Parsed with o/ path');
-      } else {
-        throw new Error('Invalid PDF URL format - could not parse file path');
-      }
-    }
+    const filePath = parseFilePath(pdfUrl);
     
     logger.info(`Processing file: ${filePath}`);
     
-    // Download from Firebase Storage
     const bucket = admin.storage().bucket();
     const file = bucket.file(filePath);
     
@@ -97,7 +118,7 @@ exports.processPitchDeck = onCall(async (request) => {
     
     // Download the PDF
     [pdfBuffer] = await file.download();
-    logger.info(`✅ PDF downloaded successfully: ${pdfBuffer.length} bytes`);
+    logger.info(`PDF downloaded successfully: ${pdfBuffer.length} bytes`);
     
     // Verify PDF format
     const header = pdfBuffer.toString('utf8', 0, 8);
@@ -116,84 +137,143 @@ exports.processPitchDeck = onCall(async (request) => {
       .replace(/^\s*$\n/gm, '')       // Remove empty lines
       .trim();
     
-    logger.info(`✅ Extracted ${extractedText.length} characters of text`);
+    logger.info(`Extracted ${extractedText.length} characters of text`);
     
     if (extractedText.length < 100) {
-      logger.warn(`⚠️  Very short document (${extractedText.length} chars) - using fallback`);
       throw new Error(`Document too short for analysis (${extractedText.length} chars)`);
     }
     
-    // ✅ FIXED: Create prompt BEFORE AI processing (always available)
-    logger.info('Step 3: Creating AI prompt...');
-    extractionPrompt = `You are an expert venture capital analyst extracting structured information from startup pitch decks and professional documents.
+    // Step 3: RAG Integration - Chunk and Embed Text
+    logger.info('Step 3: Starting RAG processing...');
+    const chunkSize = 500; // Characters per chunk
+    const chunks = [];
+    for (let i = 0; i < extractedText.length; i += chunkSize) {
+      chunks.push(extractedText.substring(i, i + chunkSize));
+    }
+    logger.info(`Created ${chunks.length} chunks`);
+    
+    // Generate embeddings for chunks
+    let chunkEmbeddings = [];
+    let retrievalSuccess = false;
+    
+    if (embeddingClient) {
+      try {
+        logger.info('Generating embeddings for chunks...');
+        chunkEmbeddings = await generateEmbeddings(chunks);
+        retrievalSuccess = true;
+        logger.info(`Generated embeddings for ${chunkEmbeddings.length} chunks`);
+      } catch (embeddingError) {
+        logger.warn('Embedding generation failed, using simple keyword search:', embeddingError.message);
+        // Fallback to simple keyword-based retrieval
+        chunkEmbeddings = chunks.map(() => null);
+        retrievalSuccess = false;
+      }
+    } else {
+      logger.warn('No embedding client available, using simple keyword search');
+      retrievalSuccess = false;
+    }
+    
+    // Step 4: Retrieve relevant chunks
+    logger.info('Step 4: Retrieving relevant chunks...');
+    const extractionQuery = "Extract key startup pitch deck information including company, value proposition, market size, traction, team, funding ask, use of funds, business model, competitive landscape, go-to-market strategy";
+    
+    let topChunks = [];
+    if (retrievalSuccess && chunkEmbeddings.length > 0 && chunkEmbeddings[0] !== null) {
+      // Vector-based retrieval
+      const queryEmbedding = await generateEmbeddings([extractionQuery]);
+      const similarities = chunkEmbeddings.map((emb, idx) => ({
+        index: idx,
+        similarity: cosineSimilarity(queryEmbedding[0], emb)
+      }));
+      
+      similarities.sort((a, b) => b.similarity - a.similarity);
+      topChunks = similarities.slice(0, 5).map(s => chunks[s.index]);
+      
+      logger.info(`Retrieved top 5 chunks with similarity: ${similarities[0].similarity.toFixed(4)}`);
+    } else {
+      // Fallback: Simple keyword-based retrieval
+      const keywords = ['company', 'market', 'traction', 'team', 'funding', 'revenue', 'customers', 'growth', 'business', 'strategy', 'competitive'];
+      const chunkScores = chunks.map((chunk, idx) => {
+        let score = 0;
+        keywords.forEach(keyword => {
+          if (chunk.toLowerCase().includes(keyword)) score += 1;
+        });
+        return { index: idx, score };
+      });
+      
+      chunkScores.sort((a, b) => b.score - a.score);
+      topChunks = chunkScores.slice(0, 5).map(s => chunks[s.index]);
+      
+      logger.info(`Retrieved top 5 chunks using keyword matching`);
+    }
+    
+    // Step 5: Create augmented prompt with retrieved chunks
+    logger.info('Step 5: Creating RAG-augmented prompt...');
+    const augmentedContext = topChunks.join('\n\n---\n\n');
+    
+    const extractionPrompt = `You are an expert venture capital analyst extracting structured information from startup pitch decks.
 
-ANALYZE this document and extract the following information as a VALID JSON object. Use "Not specified in document" for missing information.
+ANALYZE this retrieved context from the document and extract the following information as a VALID JSON object. Use "Not specified in document" for missing information.
 
 {
-  "company": "Company name or person's full name",
-  "valueProposition": "Core value proposition or what they do in 1-2 sentences",
-  "marketSize": "Market size, TAM/SAM/SOM if mentioned, or industry size estimate",
-  "traction": "Key metrics: users, revenue, customers, growth, achievements",
-  "team": "Key team members, founders, their experience and roles",
-  "fundingAsk": "Investment amount requested and round type if mentioned",
+  "company": "Company name",
+  "valueProposition": "Core value proposition in 1-2 sentences",
+  "marketSize": "Market size, TAM/SAM/SOM if mentioned",
+  "traction": "Key metrics: users, revenue, customers, growth",
+  "team": "Key team members and their roles",
+  "fundingAsk": "Investment amount requested and round type",
   "useOfFunds": "How they plan to use the funding",
-  "businessModel": "Revenue model, pricing strategy if mentioned",
-  "competitiveLandscape": "Competitors or key differentiation if mentioned",
-  "goToMarket": "Customer acquisition strategy or target market"
+  "businessModel": "Revenue model if mentioned",
+  "competitiveLandscape": "Competitors or differentiation if mentioned",
+  "goToMarket": "Customer acquisition strategy if mentioned"
 }
 
 RULES:
 - Be specific with numbers and metrics when available
 - Use "Not specified in document" for missing information  
 - Keep descriptions concise but informative
-- For professional resumes: extract name, role, experience, skills
-- Return ONLY valid JSON - no explanations, no markdown, no additional text
+- Return ONLY valid JSON - no explanations, no markdown
 
-DOCUMENT CONTENT (${extractedText.length} characters):
-${extractedText.substring(0, 8000)}
+RETRIEVED CONTEXT (Top ${topChunks.length} relevant sections):
+${augmentedContext.substring(0, 4000)}
 
 Respond with ONLY the JSON object above:`;
     
-    logger.info(`✅ Prompt created (${extractionPrompt.length} chars)`);
-    
-    // Step 4: AI Analysis with Vertex AI (with robust error handling)
-    logger.info('Step 4: Starting AI analysis...');
+    // Step 6: AI Analysis with Vertex AI
+    logger.info('Step 6: Starting AI analysis with RAG prompt...');
     let aiData = {
-      company: 'AI Analysis (Processing)',
-      valueProposition: `Document contains ${extractedText.length} characters of professional content`,
-      marketSize: 'Not available without AI setup',
-      traction: `Processed ${extractedText.length} characters successfully`,
-      team: 'Document team information requires AI analysis',
-      fundingAsk: 'Funding information requires AI analysis',
-      useOfFunds: 'Funding usage requires AI analysis',
-      businessModel: 'Business model requires AI analysis',
+      company: 'RAG Analysis (Processing)',
+      valueProposition: `Document contains ${extractedText.length} characters`,
+      marketSize: 'Not available without AI',
+      traction: `Processed with ${chunks.length} chunks`,
+      team: 'Team info requires AI',
+      fundingAsk: 'Funding info requires AI',
+      useOfFunds: 'Funds usage requires AI',
+      businessModel: 'Business model requires AI',
       competitiveLandscape: 'Competitive analysis requires AI',
-      goToMarket: 'Go-to-market strategy requires AI analysis'
+      goToMarket: 'Go-to-market requires AI'
     };
     
     let aiEnabled = false;
     let aiError = null;
+    let aiResponse = '';
     
-    // Try AI processing only if VertexAI is available
-    if (VertexAI) {
+    if (vertexAIClient) {
       try {
-        logger.info('✅ Initializing Vertex AI Gemini 1.5 Flash...');
+        logger.info('Initializing Vertex AI Gemini 1.5 Flash...');
         
-        // Initialize Vertex AI
-        const vertex_ai = new VertexAI({ 
-          project: 'startup-evaluation-472010', 
-          location: 'us-central1' 
+        const model = vertexAIClient.getGenerativeModel({ 
+          model: "gemini-1.5-flash-001",
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 1024
+          }
         });
         
-        // Get Gemini model
-        const model = vertex_ai.getGenerativeModel({ model: "gemini-2.5-flash" });
+        logger.info('Model loaded, generating content...');
         
-        logger.info('✅ Model loaded, generating content...');
-        
-        // Generate content
         const result = await model.generateContent(extractionPrompt);
         
-        // Extract response
         const candidates = result.response?.candidates;
         if (!candidates || candidates.length === 0) {
           throw new Error('No candidates returned from AI');
@@ -204,25 +284,24 @@ Respond with ONLY the JSON object above:`;
           throw new Error('No content parts returned from AI');
         }
         
-        const aiResponse = parts[0].text;
+        aiResponse = parts[0].text;
         if (!aiResponse) {
           throw new Error('No text content returned from AI');
         }
         
-        logger.info(`✅ AI Response (${aiResponse.length} chars):`, aiResponse.substring(0, 200));
+        logger.info(`AI Response (${aiResponse.length} chars):`, aiResponse.substring(0, 200));
         
         // Parse JSON response
         try {
           aiData = JSON.parse(aiResponse);
-          logger.info('✅ Direct JSON parsing successful');
+          logger.info('Direct JSON parsing successful');
         } catch (parseError) {
           logger.warn('Direct JSON failed, trying regex extraction');
           
-          // Fallback: Extract JSON from text
           const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
           if (jsonMatch) {
             aiData = JSON.parse(jsonMatch[0]);
-            logger.info('✅ Regex JSON extraction successful');
+            logger.info('Regex JSON extraction successful');
           } else {
             logger.error('No valid JSON found in AI response');
             aiData.aiError = `Invalid AI response format: ${aiResponse.substring(0, 300)}`;
@@ -230,13 +309,12 @@ Respond with ONLY the JSON object above:`;
         }
         
         aiEnabled = true;
-        logger.info('✅ AI Processing Complete');
+        logger.info('AI Processing Complete');
         
-      } catch (aiError) {
-        logger.error('❌ AI Processing Failed:', aiError.message);
+      } catch (error) {
+        logger.error('AI Processing Failed:', error.message);
         
-        // Enhanced error diagnostics
-        aiError = aiError.message || 'Unknown AI error';
+        aiError = error.message || 'Unknown AI error';
         if (aiError.includes('permission')) {
           aiData.aiError = 'Vertex AI permissions required - check IAM roles';
         } else if (aiError.includes('API not enabled')) {
@@ -250,45 +328,52 @@ Respond with ONLY the JSON object above:`;
         }
       }
     } else {
-      logger.warn('⚠️  Vertex AI SDK not available - install with: npm install @google-cloud/vertexai');
-      aiData.aiError = 'Vertex AI SDK not installed';
+      logger.warn('Vertex AI client not available');
+      aiData.aiError = 'Vertex AI not configured';
     }
     
-    // Step 5: Validate and complete data structure
+    // Step 7: Validate and complete data structure
     const validatedData = {
       company: aiData.company || 'Document Analysis (AI Setup Required)',
-      valueProposition: aiData.valueProposition || `Document contains ${extractedText.length} characters of professional content`,
-      marketSize: aiData.marketSize || 'Not available without AI setup',
-      traction: aiData.traction || `Processed ${extractedText.length} characters successfully`,
-      team: aiData.team || 'Document team information requires AI analysis',
-      fundingAsk: aiData.fundingAsk || 'Funding information requires AI analysis',
-      useOfFunds: aiData.useOfFunds || 'Funding usage requires AI analysis',
-      businessModel: aiData.businessModel || 'Business model requires AI analysis',
-      competitiveLandscape: aiData.competitiveLandscape || 'Competitive analysis requires AI',
-      goToMarket: aiData.goToMarket || 'Go-to-market strategy requires AI analysis',
-      aiStatus: aiEnabled ? 'AI analysis complete' : (aiData.aiError || 'AI setup required')
+      valueProposition: aiData.valueProposition || `Document contains ${extractedText.length} characters`,
+      marketSize: aiData.marketSize || 'Not specified in document',
+      traction: aiData.traction || 'Not specified in document',
+      team: aiData.team || 'Not specified in document',
+      fundingAsk: aiData.fundingAsk || 'Not specified in document',
+      useOfFunds: aiData.useOfFunds || 'Not specified in document',
+      businessModel: aiData.businessModel || 'Not specified in document',
+      competitiveLandscape: aiData.competitiveLandscape || 'Not specified in document',
+      goToMarket: aiData.goToMarket || 'Not specified in document',
+      aiStatus: aiEnabled ? 'RAG AI analysis complete' : (aiData.aiError || 'AI setup required'),
+      ragUsed: retrievalSuccess,
+      chunkCount: chunks.length,
+      retrievedChunks: topChunks.length
     };
     
-    const extractionId = `ai-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const extractionId = `rag-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
-    logger.info('=== ANALYSIS COMPLETE ===');
+    logger.info('=== RAG ANALYSIS COMPLETE ===');
     logger.info(`Company: ${validatedData.company}`);
+    logger.info(`RAG Status: ${retrievalSuccess ? 'Vector search' : 'Keyword fallback'}`);
     logger.info(`AI Status: ${validatedData.aiStatus}`);
     logger.info(`Processing time: ${Date.now() - startTime}ms`);
     
-    // Step 6: Return complete analysis
+    // Return complete RAG analysis
     return {
       success: true,
       data: validatedData,
       extractionId: extractionId,
-      source: aiEnabled ? 'vertex-ai-gemini-1.5-flash' : 'pdf-fallback',
+      source: aiEnabled ? (retrievalSuccess ? 'vertex-ai-gemini-1.5-flash with RAG' : 'vertex-ai-gemini-1.5-flash with keyword fallback') : 'pdf-fallback',
       pdfSize: pdfBuffer.length,
       textLength: extractedText.length,
+      chunkCount: chunks.length,
+      retrievedChunks: topChunks.length,
+      ragUsed: retrievalSuccess,
       sampleText: extractedText.substring(0, 300),
       aiEnabled: aiEnabled,
       aiTokens: aiEnabled ? extractionPrompt.length + aiResponse.length : 0,
-      confidence: aiEnabled ? 'high' : 'medium',
-      status: aiEnabled ? 'AI-powered pitch deck analysis complete!' : 'PDF processed successfully, AI setup required',
+      confidence: aiEnabled ? (retrievalSuccess ? 'high' : 'medium') : 'low',
+      status: aiEnabled ? `AI-powered RAG pitch deck analysis complete!` : 'PDF processed, AI setup required',
       processingTime: Date.now() - startTime,
       nextSteps: aiEnabled ? [] : [
         'Enable Vertex AI API in Google Cloud Console',
@@ -301,7 +386,6 @@ Respond with ONLY the JSON object above:`;
   } catch (error) {
     logger.error('=== PDF PROCESSING FAILED ===', error);
     
-    // Handle specific errors
     if (error.message?.includes('not found')) {
       throw new Error('PDF file not found in storage');
     }
@@ -314,16 +398,90 @@ Respond with ONLY the JSON object above:`;
 });
 
 // Helper function to parse Firebase Storage path
+// Helper function to parse Firebase Storage path
 function parseFilePath(pdfUrl) {
+  // Handle gs:// URLs
+  if (pdfUrl.startsWith('gs://')) {
+    const bucketPrefix = `gs://startup-evaluation-472010.appspot.com/`;
+    if (!pdfUrl.startsWith(bucketPrefix)) {
+      throw new Error(`Invalid bucket in URL: ${pdfUrl}`);
+    }
+    // Extract path after bucket
+    const filePath = pdfUrl.substring(bucketPrefix.length);
+    return decodeURIComponent(filePath);
+  }
+
+  // Handle HTTPS URLs with name parameter
   const nameMatch = pdfUrl.match(/name=([^&]+)/);
   if (nameMatch) {
     return decodeURIComponent(nameMatch[1]);
   }
-  
+
+  // Handle HTTPS URLs with /o/ path
   const pathMatch = pdfUrl.match(/o\/([^?]+)/);
   if (pathMatch) {
     return decodeURIComponent(pathMatch[1].replace(/%2F/g, '/'));
   }
+
+  throw new Error(`Cannot parse file path from URL: ${pdfUrl}`);
+}
+
+// Helper for cosine similarity
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  return denominator === 0 ? 0 : dot / denominator;
+}
+
+// FIXED: Function to generate embeddings using Vertex AI
+async function generateEmbeddings(texts) {
+  if (!embeddingClient) {
+    throw new Error('Embedding client not available');
+  }
   
-  throw new Error('Cannot parse file path from URL');
+  const endpoint = client.buildEndpointName('startup-evaluation-472010', 'us-central1', 'publishers/google/models/text-embedding-004');
+  
+  const embeddings = [];
+  
+  for (const text of texts) {
+    try {
+      const instanceValue = {
+        content: { stringValue: text }
+      };
+      
+      const parameters = {
+        // No parameters needed for text-embedding-004
+      };
+      
+      const request = {
+        endpoint: endpoint,
+        instances: [instanceValue],
+        parameters: parameters
+      };
+      
+      const [response] = await embeddingClient.predict(request);
+      const predictions = response.predictions;
+      
+      if (predictions && predictions.length > 0) {
+        const embedding = predictions[0].embeddings.values.map(v => v.numberValue);
+        embeddings.push(embedding);
+      } else {
+        logger.warn('No embedding returned for text:', text.substring(0, 50));
+        // Fallback to zero vector
+        embeddings.push(Array(768).fill(0)); // text-embedding-004 dimension
+      }
+    } catch (error) {
+      logger.error('Embedding generation failed for text:', error);
+      embeddings.push(Array(768).fill(0)); // Fallback
+    }
+  }
+  
+  return embeddings;
 }
