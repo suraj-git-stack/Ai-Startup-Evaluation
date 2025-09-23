@@ -1,5 +1,16 @@
 {
+  "name": "startup-evaluation",
+  "version": "1.0.0",
+  "description": "Startup Evaluation Platform with RAG AI",
+  "scripts": {
+    "dev": "firebase emulators:start",
+    "deploy": "firebase deploy",
+    "functions:deploy": "firebase deploy --only functions",
+    "functions:shell": "firebase functions:shell"
+  },
   "dependencies": {
-    "firebase-functions": "^6.4.0"
-  }
+    "firebase": "^10.14.1",
+    "firebase-functions": "^5.1.0"
+  },
+  "private": true
 }
