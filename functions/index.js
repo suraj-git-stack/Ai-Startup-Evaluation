@@ -193,7 +193,7 @@ Respond with ONLY the JSON object above:`;
           location: 'us-central1' 
         });
         
-        const model = vertex_ai.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = vertex_ai.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
         
         logger.info('Model loaded, generating content...');
         
