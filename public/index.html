@@ -1318,13 +1318,13 @@
     
     // Your web app's Firebase configuration
     const firebaseConfig = {
-         apiKey: "AIzaSyBKcwO-L1zL4jWRimBHdVgtXqZ6snRT_Ng",
-  authDomain: "startup-evaluation-472010.firebaseapp.com",
-  projectId: "startup-evaluation-472010",
-  storageBucket: "startup-evaluation-472010.firebasestorage.app",
-  messagingSenderId: "229321540719",
-  appId: "1:229321540719:web:cbdf6d3928f80e1ee7399a",
-  measurementId: "G-CFMXZLW3CT"
+         apiKey: "",
+  authDomain: "",
+  projectId: "",
+  storageBucket: "",
+  messagingSenderId: "229",
+  appId: "1:221540719:e1ee7399a",
+  measurementId: "G-CFMX"
     };
 
     // Initialize Firebase
@@ -1574,7 +1574,8 @@
 
     // Fetch company logo (use public API or backend if secured)
     async function fetchCompanyLogo(domain) {
-      const LOGO_API_KEY = 'sk_NE5PQxn6TJy4wTgEB7Hitg'; // Move to backend in full production
+      const LOGO_API_KEY = '
+          '; // Move to backend in full production
       try {
         const response = await fetch(`https://logo.dev/api/v1/logo?domain=${domain}&api_key=${LOGO_API_KEY}`);
         const data = await response.json();
