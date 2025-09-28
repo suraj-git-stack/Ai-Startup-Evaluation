@@ -95,7 +95,7 @@ firebase deploy --only functions
 
 - Total MVP Cost: $10–$80 for hackathon-ready app.
 
-##🔮 Future Enhancements
+## 🔮 Future Enhancements
 
 - Add support for more file types (e.g., MP3, MP4).
 
